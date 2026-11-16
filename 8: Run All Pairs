@@ -1,0 +1,36 @@
+all_trades = []
+curves = {}
+for name, s in all_signals.items():
+    t,e = backtest_pair(s,name)
+    curves[name] = e
+    if len(t): all_trades.append(t)
+    print(f'{name:8} | closed trades {len(t):4} | last open position {int(e.open.iloc[-1]) if len(e) else 0}')
+trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
+pnl = pd.concat({name:curve['pnl'] for name,curve in curves.items() if not curve.empty},axis=1).sort_index().ffill().fillna(0)
+portfolio = pd.DataFrame(index=pnl.index)
+portfolio['equity'] = INITIAL_CAPITAL + pnl.sum(axis=1)
+portfolio['drawdown_pct'] = (portfolio.equity/portfolio.equity.cummax()-1)*100
+# Resample to actual NY market session close; portfolio includes MTM on still-open trades.
+daily_eq = portfolio.equity.groupby(portfolio.index.date).last()
+returns = daily_eq.pct_change().dropna()
+print('\nSIMULATED MARK-TO-MARKET RESULTS (NOT dividend-adjusted / NBBO-executed):')
+print('Start:',str(portfolio.index[0]), 'End:',str(portfolio.index[-1]))
+print('Closed trades:',len(trades), 'Open positions:',sum(int(c.open.iloc[-1]) for c in curves.values() if len(c)))
+print('Final equity:',f'${portfolio.equity.iloc[-1]:,.2f}')
+print('Return:',f'{(portfolio.equity.iloc[-1]/INITIAL_CAPITAL-1)*100:.2f}%')
+print('Max drawdown:',f'{portfolio.drawdown_pct.min():.2f}%')
+print('Daily Sharpe:',round(np.sqrt(252)*returns.mean()/returns.std(),2) if returns.std()>0 else np.nan)
+if not trades.empty:
+    assert (trades['entry'] > trades['signal_time']).all(), 'Look-ahead: entry before signal!'
+    assert (trades['exit'] > trades['entry']).all(), 'Exit before entry!'
+    assert (trades['entry_gross'] <= INITIAL_CAPITAL * MAX_GROSS_PER_PAIR + 1e-6).all(), 'Gross exposure cap violated!'
+    display(trades.groupby('pair').agg(trades=('net_pnl','size'),pnl=('net_pnl','sum'),
+                                     win_rate=('net_pnl',lambda x:float((x>0).mean())),
+                                     avg_holding_days=('calendar_days','mean')))
+    display(trades.tail(20))
+else:
+    print('No trades: inspect model_summary eligible_periods / valid_signal_bars / entry_level_bars.')
+fig,axs = plt.subplots(2,1,figsize=(12,7),sharex=True)
+portfolio.equity.plot(ax=axs[0],title='Portfolio equity (including open MTM)')
+portfolio.drawdown_pct.plot(ax=axs[1],title='Drawdown (%)')
+plt.tight_layout();plt.show()
