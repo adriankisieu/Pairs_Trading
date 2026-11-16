@@ -1,0 +1,42 @@
+# Uncomment if needed, then run once:
+%pip install -q databento pandas numpy scipy statsmodels matplotlib
+
+from pathlib import Path
+from getpass import getpass
+import math
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from statsmodels.tsa.stattools import coint
+
+PAIRS = [
+    ('KO', 'PEP'), ('XOM', 'CVX'), ('V', 'MA'), ('HD', 'LOW'),
+    ('JPM', 'BAC'), ('UPS', 'FDX'), ('DUK', 'SO'), ('DAL', 'UAL')
+]
+SYMBOLS = sorted({s for pair in PAIRS for s in pair})
+DATASET = 'EQUS.MINI'         # multi-venue-derived, available since 2023-03-28
+START = '2023-03-28'
+END = '2026-11-01'           # end is EXCLUSIVE
+DATA_FILE = Path('pairs_1min_EQUS_MINI.dbn.zst')
+DOWNLOAD_DATA = False       # True explicitly authorizes a charged historical download
+
+INITIAL_CAPITAL = 100_000.0
+MAX_GROSS_PER_PAIR = 0.125 # at most $12,500 gross per pair; eight pairs <= $100k gross
+RISK_PER_TRADE = 0.01     # 1% of initial capital = $1,000 hard-loss trigger; gaps can exceed it
+ENTRY_Z = 3.0
+TAKE_PROFIT_Z = 0.25
+STOP_Z = 4.5
+Z_DAYS = 20               # 20 * 390 completed common one-minute bars
+TRAIN_DAYS = 252           # initial training; also refit on past 252 days quarterly
+RETRAIN_EVERY_DAYS = 63
+COINT_P_MAX = 0.10
+REQUIRE_COINTEGRATION = True
+HALF_SPREAD_BPS = 2.0      # modeled per side, per leg (not observed quotes)
+SLIPPAGE_BPS = 1.0        # modeled per side, per leg
+COMMISSION_PER_SHARE = 0.05
+MIN_COMMISSION = 1.0     # per leg, per order
+BORROW_APR = 0.02         # assumed short borrow; actual rates vary
+TZ = 'America/New_York'
+
+print(f'{len(PAIRS)} pairs / {len(SYMBOLS)} stocks. Data download enabled: {DOWNLOAD_DATA}')
