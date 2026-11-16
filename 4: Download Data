@@ -1,5 +1,6 @@
 UPDATE_START = '2026-11-01'
 UPDATE_END = '2026-11-17'
+update_end = UPDATE_END
 
 if DATA_FILE.exists():
     print('Using cached file:', DATA_FILE.resolve())
