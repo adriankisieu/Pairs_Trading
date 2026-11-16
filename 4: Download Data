@@ -1,7 +1,13 @@
 UPDATE_START = '2026-11-01'
 UPDATE_END = '2026-11-17'
-update_end = UPDATE_END
+available_end = pd.Timestamp(
+    client.metadata.get_dataset_range(DATASET)['end']
+)
 
+update_end = min(
+    pd.Timestamp(UPDATE_END, tz='UTC'),
+    available_end
+).isoformat()
 if DATA_FILE.exists():
     print('Using cached file:', DATA_FILE.resolve())
 elif DOWNLOAD_DATA:
