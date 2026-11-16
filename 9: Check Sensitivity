@@ -1,0 +1,12 @@
+stress=[]
+for spread,slip in [(1,1),(2,1),(5,3),(10,5)]:
+    total=0.
+    counts=0
+    for name,s in all_signals.items():
+        t,e = backtest_pair(s,name,spread,slip)
+        total += float(e.pnl.iloc[-1]) if not e.empty else 0.
+        counts += len(t)
+    stress.append({'half_spread_bps':spread,'slippage_bps':slip,'closed_trades':counts,
+                   'ending_equity':INITIAL_CAPITAL+total,
+                   'net_pnl_including_open':total})
+display(pd.DataFrame(stress))
