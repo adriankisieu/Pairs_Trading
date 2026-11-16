@@ -1,0 +1,100 @@
+def fee(q):
+    return max(MIN_COMMISSION, COMMISSION_PER_SHARE * abs(int(q))) if q else 0.
+
+def fill(price, signed_quantity, half_spread_bps=HALF_SPREAD_BPS, slippage_bps=SLIPPAGE_BPS):
+    # Positive qty is buy, negative qty is sell; adverse fill on either side.
+    return price * (1 + np.sign(signed_quantity) * (half_spread_bps + slippage_bps) / 10_000)
+
+def backtest_pair(s, name, half_spread_bps=HALF_SPREAD_BPS, slippage_bps=SLIPPAGE_BPS):
+    if len(s) == 0:
+        return pd.DataFrame(), pd.DataFrame()
+    times = s.index
+    o_a, o_b, c_a, c_b = (s[c].to_numpy(dtype=float) for c in ['oa','ob','ca','cb'])
+    z = s['z'].to_numpy(dtype=float)
+    be = s['beta'].to_numpy(dtype=float)
+    eligible = s['eligible'].to_numpy(dtype=bool)
+    valid = eligible & np.isfinite(z)
+    pos = None
+    pending = None
+    realized = 0.
+    ledger, eq = [], []
+    gross_limit = INITIAL_CAPITAL * MAX_GROSS_PER_PAIR
+    risk_dollars = INITIAL_CAPITAL * RISK_PER_TRADE
+    n_entries = 0
+    for i, ts in enumerate(times):
+        # OPEN: previously queued order, with adverse bid/ask/slippage assumption
+        if pending is not None:
+            kind, reason, signal_i, direction = pending
+            pending = None
+            if kind == 'exit' and pos is not None:
+                qa, qb = pos['qa'], pos['qb']
+                xa = fill(o_a[i], -qa, half_spread_bps, slippage_bps)
+                xb = fill(o_b[i], -qb, half_spread_bps, slippage_bps)
+                exit_comm = fee(qa) + fee(qb)
+                borrow = pos['short_notional'] * BORROW_APR * max(0,(ts-pos['entry_time']).total_seconds())/(365.25*86400)
+                trade_pnl = qa*(xa-pos['fill_a']) + qb*(xb-pos['fill_b']) - pos['entry_comm'] - exit_comm - borrow
+                ledger.append({'pair':name, 'signal_time':pos['signal_time'], 'entry':pos['entry_time'],
+                               'exit':ts, 'side':'LONG A / SHORT B' if qa>0 else 'SHORT A / LONG B',
+                               'qty_a':qa, 'qty_b':qb, 'entry_z':pos['entry_z'],
+                               'entry_gross':pos['gross'], 'net_pnl':trade_pnl,
+                               'borrow_cost':borrow, 'exit_reason':reason,
+                               'calendar_days':(ts-pos['entry_time']).total_seconds()/86400})
+                realized += trade_pnl
+                pos = None
+            elif kind == 'enter' and pos is None and valid[signal_i]:
+                # Skip stale signal if the next available bar is not the next minute within the same session.
+                if (ts-times[signal_i]).total_seconds() > 60:
+                    pass
+                else:
+                    beta, zi = be[signal_i], z[signal_i]
+                    std_log_spread = s['spread'].iloc[max(0,signal_i-390*Z_DAYS):signal_i].std()
+                    if np.isfinite(std_log_spread) and std_log_spread > 0 and beta > 0:
+                        qty_by_gross = gross_limit / (o_a[i] * (1 + beta))
+                        estimated_move = max(STOP_Z - abs(zi),0.5)*std_log_spread
+                        qty_by_risk = risk_dollars / max(o_a[i]*estimated_move, 1e-9)
+                        na = int(max(0,math.floor(min(qty_by_gross,qty_by_risk))))
+                        nb = int(max(0,round(na * o_a[i] * beta / o_b[i])))
+                        while na > 0 and nb > 0 and na*o_a[i] + nb*o_b[i] > gross_limit:
+                            na-=1
+                            nb=int(round(na*o_a[i]*beta/o_b[i]))
+                        if na and nb:
+                            qa,qb = direction*na,-direction*nb
+                            pos = {'qa':qa, 'qb':qb,'fill_a':fill(o_a[i],qa,half_spread_bps,slippage_bps),
+                                   'fill_b':fill(o_b[i],qb,half_spread_bps,slippage_bps),
+                                   'entry_comm':fee(qa)+fee(qb),'entry_time':ts, 'signal_time':times[signal_i],
+                                   'entry_z':zi,'gross':na*o_a[i]+nb*o_b[i],
+                                   'short_notional':(-min(qa,0))*o_a[i]+(-min(qb,0))*o_b[i],
+                                   'direction':direction}
+                            n_entries += 1
+        # CLOSE: a new decision uses the *completed* bar; next-bar fill only.
+        mtm = 0.
+        if pos is not None:
+            borrow_to_now = pos['short_notional']*BORROW_APR*max(0,(ts-pos['entry_time']).total_seconds())/(365.25*86400)
+            mtm = pos['qa']*(c_a[i]-pos['fill_a'])+pos['qb']*(c_b[i]-pos['fill_b'])-pos['entry_comm']-borrow_to_now
+            if pending is None and i+1<len(s):
+                # If model fails on refit, don't just hold unmonitored.
+                reason = None
+                if mtm <= -risk_dollars: reason = 'HARD LOSS'
+                elif np.isfinite(z[i]) and ((pos['direction']==1 and z[i]<=-STOP_Z) or
+                                              (pos['direction']==-1 and z[i]>=STOP_Z)):
+                    reason = 'Z STOP'
+                elif np.isfinite(z[i]) and ((pos['direction']==1 and z[i]>=-TAKE_PROFIT_Z) or
+                                              (pos['direction']==-1 and z[i]<=TAKE_PROFIT_Z)):
+                    reason = 'MEAN REVERSION'
+                elif not valid[i]: reason = 'RELATIONSHIP / DATA INVALID'
+                if reason:
+                    pending=('exit',reason,i,None)
+        elif pending is None and i+1 < len(s) and valid[i] and i>0 and valid[i-1]:
+            old,cur=z[i-1],z[i]
+            if ENTRY_Z <= abs(cur) < STOP_Z:
+                direction = (-1 if cur>=ENTRY_Z and old<ENTRY_Z else
+                              1 if cur<=-ENTRY_Z and old>-ENTRY_Z else 0)
+                if direction:
+                    pending=('enter','ENTRY',i,direction)
+        eq.append((ts,realized + mtm, int(pos is not None)))
+    # At sample end, OPEN positions are marked-to-market, not falsely booked as closed trades.
+    equity = pd.DataFrame(eq,columns=['time','pnl','open']).set_index('time')
+    trades = pd.DataFrame(ledger)
+    return trades, equity
+
+print('Backtester ready; this cell itself never downloads data or places orders.')
