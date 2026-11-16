@@ -1,0 +1,78 @@
+def pair_frame(a, b, all_bars):
+    left = all_bars[a][['open', 'close']].rename(columns={'open':'oa', 'close':'ca'})
+    right = all_bars[b][['open', 'close']].rename(columns={'open':'ob', 'close':'cb'})
+    f = left.join(right, how='inner').dropna().sort_index()
+    return f[(f[['oa','ca','ob','cb']] > 0).all(axis=1)]
+
+def make_pair_signals(f, warm_start=True):
+    out = f.copy()
+    out['date'] = out.index.date
+    dates = np.array(sorted(pd.unique(out['date'])))
+    out['beta'] = np.nan
+    out['alpha'] = np.nan
+    out['p_coint'] = np.nan
+    out['eligible'] = False
+    fits = []
+    if len(dates) < TRAIN_DAYS + 10:
+        return out, fits
+    daily = out.groupby('date')[['ca','cb']].last()
+    for start_ix in range(TRAIN_DAYS, len(dates), RETRAIN_EVERY_DAYS):
+        t0, t1 = dates[start_ix], dates[min(start_ix + RETRAIN_EVERY_DAYS, len(dates)) - 1]
+        sample = daily.iloc[start_ix - TRAIN_DAYS:start_ix]
+        la = np.log(sample.ca.to_numpy())
+        lb = np.log(sample.cb.to_numpy())
+        beta, alpha = np.polyfit(lb, la, 1)
+        try:
+            pval = float(coint(la, lb, trend='c', autolag='aic')[1])
+        except (ValueError, np.linalg.LinAlgError):
+            pval = 1.0
+        good = np.isfinite(beta) and 0.1 < beta < 5.0 and np.isfinite(pval) and (pval < COINT_P_MAX or not REQUIRE_COINTEGRATION)
+        mask = (out['date'] >= t0) & (out['date'] <= t1)
+        out.loc[mask, ['beta','alpha','p_coint']] = [float(beta),float(alpha),pval]
+        out.loc[mask, 'eligible'] = bool(good)
+        fits.append({'start':str(t0), 'end':str(t1), 'alpha':alpha, 'beta':beta, 'coint_p':pval, 'eligible':good})
+    # Each regime has its own beta/alpha. Seed the rolling window with prior
+    # observed bars recomputed under THIS regime's fit, not the previous fit.
+    # All seed prices predate the refit; rolling.shift(1) excludes the current bar.
+    out['spread'] = np.log(out.ca) - out.alpha - out.beta * np.log(out.cb)
+    out['z'] = np.nan
+    window = 390 * Z_DAYS
+    date_values = out['date'].to_numpy()
+    log_ca = np.log(out['ca'].to_numpy(dtype=float))
+    log_cb = np.log(out['cb'].to_numpy(dtype=float))
+    for fit in fits:
+        regime_start = np.searchsorted(date_values, pd.Timestamp(fit['start']).date(), side='left')
+        regime_end = np.searchsorted(date_values, pd.Timestamp(fit['end']).date(), side='right')
+        if not warm_start:
+            history_start = regime_start  # old behavior, for A/B testing
+        else:
+            history_start = max(0, regime_start - window)
+        # The refitted coefficients are estimated from prior daily bars only.
+        r = pd.Series(log_ca[history_start:regime_end] - fit['alpha'] - fit['beta'] * log_cb[history_start:regime_end])
+        mean = r.rolling(window, min_periods=window).mean().shift(1)
+        std = r.rolling(window, min_periods=window).std().shift(1)
+        z_vals = ((r - mean) / std.where(std > 1e-8)).to_numpy()
+        out.iloc[regime_start:regime_end, out.columns.get_loc('z')] = z_vals[regime_start-history_start:]
+    return out, fits
+
+all_signals = {}
+model_summary = []
+for a, b in PAIRS:
+    key = f'{a}/{b}'
+    if a not in bars or b not in bars:
+        print(key, ': missing symbol, skipped')
+        continue
+    if coverage.set_index('symbol').loc[[a,b], 'large_daily_jump'].max() > 0.25:
+        print(key, ': possible stock split / extreme jump, skipped until adjusted/verified')
+        continue
+    f = pair_frame(a,b,bars)
+    s,fits = make_pair_signals(f)
+    all_signals[key] = s
+    model_summary.append({'pair': key, 'aligned_bars':len(f), 'fit_periods':len(fits),
+                          'eligible_periods':sum(t['eligible'] for t in fits),
+                          'valid_signal_bars':int((s.eligible & s.z.notna()).sum()),
+                          'entry_level_bars':int((s.eligible & s.z.abs().ge(ENTRY_Z) & s.z.abs().lt(STOP_Z)).sum())})
+model_summary = pd.DataFrame(model_summary)
+display(model_summary)
+if not all_signals:
+    raise RuntimeError('No valid pairs; inspect coverage and corporate-action flags.')
