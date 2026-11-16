@@ -1,0 +1,51 @@
+# A/B experiment: original quarterly reset versus refit-history warm-start.
+# Requires Sections 5-7 to have been run. No download or additional data purchase.
+if 'bars' not in globals() or 'backtest_pair' not in globals():
+    raise RuntimeError('Run Sections 5 through 7 first using your cached data.')
+
+ab_rows = []
+ab_ledgers = {'Original reset': [], 'Warm-start fix': []}
+ab_curves = {'Original reset': {}, 'Warm-start fix': {}}
+for a, b in PAIRS:
+    pair = f'{a}/{b}'
+    if pair not in all_signals:
+        continue
+    frame = pair_frame(a, b, bars)
+    old_signals, _ = make_pair_signals(frame, warm_start=False)
+    new_signals = all_signals[pair]  # computed with warm_start=True in Section 6
+    for label, signals in [('Original reset', old_signals), ('Warm-start fix', new_signals)]:
+        tr, eq = backtest_pair(signals, pair)
+        if not tr.empty:
+            ab_ledgers[label].append(tr)
+        if not eq.empty:
+            ab_curves[label][pair] = eq['pnl']
+        ab_rows.append({'Version': label, 'Pair': pair,
+                        'Valid eligible signal bars': int((signals.eligible & signals.z.notna()).sum()),
+                        'Closed trades': len(tr),
+                        'Win rate': (tr.net_pnl > 0).mean() if len(tr) else np.nan,
+                        'Closed net P&L': tr.net_pnl.sum() if len(tr) else 0.0,
+                        'Open at end': int(eq.open.iloc[-1]) if len(eq) else 0})
+
+ab_by_pair = pd.DataFrame(ab_rows)
+print('Per-pair comparison:')
+display(ab_by_pair)
+
+ab_summary = []
+for label, curves in ab_curves.items():
+    if not curves:
+        continue
+    joined = pd.concat(curves, axis=1, sort=True).sort_index().ffill().fillna(0.0)
+    equity_curve = INITIAL_CAPITAL + joined.sum(axis=1)
+    drawdown = equity_curve / equity_curve.cummax() - 1
+    daily = equity_curve.groupby(equity_curve.index.date).last().pct_change().dropna()
+    combined = pd.concat(ab_ledgers[label], ignore_index=True) if ab_ledgers[label] else pd.DataFrame()
+    ab_summary.append({'Version':label, 'Closed trades':len(combined),
+                       'Wins':int((combined.net_pnl > 0).sum()) if len(combined) else 0,
+                       'Closed net P&L':combined.net_pnl.sum() if len(combined) else 0.0,
+                       'Final equity (incl. open MTM)':equity_curve.iloc[-1],
+                       'Max drawdown':drawdown.min(),
+                       'Daily Sharpe':np.sqrt(252)*daily.mean()/daily.std() if daily.std() > 0 else np.nan,
+                       'Open at end':sum(ab_by_pair.loc[ab_by_pair.Version==label, 'Open at end'])})
+
+print('Portfolio comparison:')
+display(pd.DataFrame(ab_summary).set_index('Version'))
