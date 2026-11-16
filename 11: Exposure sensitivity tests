@@ -1,0 +1,87 @@
+# Uses all_signals generated in section 6. No API calls and no data download.
+if 'all_signals' not in globals() or not all_signals:
+    raise RuntimeError('Run the notebook through section 6 first, using your cached data file.')
+
+old_cap = MAX_GROSS_PER_PAIR
+scenarios = [0.125, 0.25, 0.375]
+summary = []
+scenario_trades = {}
+scenario_equity = {}
+
+try:
+    for cap in scenarios:
+        MAX_GROSS_PER_PAIR = cap
+        ledgers, equity_curves = [], {}
+        for pair_name, signals in all_signals.items():
+            t, e = backtest_pair(signals, pair_name)
+            if not t.empty:
+                ledgers.append(t)
+            if not e.empty:
+                equity_curves[pair_name] = e['pnl']
+        ts = pd.concat(ledgers, ignore_index=True) if ledgers else pd.DataFrame()
+        if not equity_curves:
+            continue
+        joined = pd.concat(equity_curves, axis=1, sort=True).sort_index().ffill().fillna(0.0)
+        curve = INITIAL_CAPITAL + joined.sum(axis=1)
+        dd = 100 * (curve / curve.cummax() - 1)
+        daily = curve.groupby(curve.index.date).last().pct_change().dropna()
+        sharpe = (np.sqrt(252) * daily.mean() / daily.std()) if daily.std() > 0 else np.nan
+
+        # Determine actual simultaneous entry-gross of currently open trades.
+        # Does not account for changes in gross notional while trades are open.
+        events = []
+        if not ts.empty:
+            for tr in ts.itertuples(index=False):
+                events.extend([(tr.entry, 1, tr.entry_gross),
+                               (tr.exit, -1, -tr.entry_gross)])
+        # At equal timestamps process exits before entries.
+        events.sort(key=lambda item: (item[0], item[1]))
+        running_gross = 0.0
+        peak_gross = 0.0
+        for _, _, change in events:
+            running_gross += change
+            peak_gross = max(peak_gross, running_gross)
+        # Open trades missing from the closed ledger make this measure incomplete.
+        n_wins = int((ts.net_pnl > 0).sum()) if not ts.empty else 0
+        gross_wins = float(ts.loc[ts.net_pnl > 0, 'net_pnl'].sum()) if not ts.empty else 0.0
+        gross_losses = float(-ts.loc[ts.net_pnl < 0, 'net_pnl'].sum()) if not ts.empty else 0.0
+        summary.append({
+            'Cap per pair': f'{cap:.1%}', 'Closed trades': len(ts),
+            'Win rate': n_wins / len(ts) if len(ts) else np.nan,
+            'Closed net P&L': ts.net_pnl.sum() if len(ts) else 0.0,
+            'Final equity': curve.iloc[-1],
+            'Portfolio return': curve.iloc[-1] / INITIAL_CAPITAL - 1,
+            'Max drawdown': dd.min() / 100,
+            'Daily Sharpe': sharpe,
+            'Profit factor': gross_wins / gross_losses if gross_losses > 0 else np.nan,
+            'Largest realized loss': ts.net_pnl.min() if len(ts) else np.nan,
+            'Peak concurrent entry gross': peak_gross,
+            'Peak gross / capital': peak_gross / INITIAL_CAPITAL,
+        })
+        scenario_trades[cap] = ts
+        scenario_equity[cap] = curve
+finally:
+    MAX_GROSS_PER_PAIR = old_cap
+
+comparison = pd.DataFrame(summary).set_index('Cap per pair')
+formatters = {k: '${:,.2f}'.format for k in ['Closed net P&L','Final equity','Largest realized loss','Peak concurrent entry gross']}
+formatters.update({k: '{:.2%}'.format for k in ['Win rate','Portfolio return','Max drawdown']})
+formatters['Peak gross / capital'] = '{:.2f}x'.format
+formatters['Daily Sharpe'] = '{:.2f}'.format
+formatters['Profit factor'] = '{:.2f}'.format
+display(comparison)  # No optional jinja2 dependency
+
+fig, ax = plt.subplots(figsize=(11, 4))
+for cap, curve in scenario_equity.items():
+    # Daily sampling makes multi-year plot faster to render.
+    daily_curve = curve.groupby(curve.index.date).last()
+    ax.plot(pd.to_datetime(daily_curve.index), daily_curve.values, label=f'{cap:.1%} per pair')
+ax.set_title('Exposure sensitivity: portfolio equity (includes open-position MTM)')
+ax.set_ylabel('Simulated equity ($)')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+print('Caution: concurrent gross is based only on CLOSED trades and ENTRY notionals.')
+print('Open positions, intratrade gross changes, margin, and corporate actions are not modeled in this exposure diagnostic.')
+print('This test uses exactly the same input data, so it does not establish out-of-sample robustness.')
