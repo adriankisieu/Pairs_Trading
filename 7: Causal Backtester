@@ -64,13 +64,26 @@ def backtest_pair(s, name, half_spread_bps=HALF_SPREAD_BPS, slippage_bps=SLIPPAG
                                    'entry_comm':fee(qa)+fee(qb),'entry_time':ts, 'signal_time':times[signal_i],
                                    'entry_z':zi,'gross':na*o_a[i]+nb*o_b[i],
                                    'short_notional':(-min(qa,0))*o_a[i]+(-min(qb,0))*o_b[i],
-                                   'direction':direction}
+                                   'direction':direction,
+                                    'entry_mean':s['mean'].iloc[signal_i],
+                                    'entry_std':s['std'].iloc[signal_i],
+                                    'entry_alpha':s['alpha'].iloc[signal_i],
+                                    'entry_beta':beta}
                             n_entries += 1
         # CLOSE: a new decision uses the *completed* bar; next-bar fill only.
         mtm = 0.
         if pos is not None:
             borrow_to_now = pos['short_notional']*BORROW_APR*max(0,(ts-pos['entry_time']).total_seconds())/(365.25*86400)
             mtm = pos['qa']*(c_a[i]-pos['fill_a'])+pos['qb']*(c_b[i]-pos['fill_b'])-pos['entry_comm']-borrow_to_now
+            fixed_spread = (
+                np.log(c_a[i])
+                - pos['entry_alpha']
+                - pos['entry_beta'] * np.log(c_b[i])
+            )
+
+            fixed_z = (
+                fixed_spread - pos['entry_mean']
+            ) / pos['entry_std']
             if pending is None and i+1<len(s):
                 # If model fails on refit, don't just hold unmonitored.
                 reason = None
@@ -78,10 +91,12 @@ def backtest_pair(s, name, half_spread_bps=HALF_SPREAD_BPS, slippage_bps=SLIPPAG
                 elif np.isfinite(z[i]) and ((pos['direction']==1 and z[i]<=-STOP_Z) or
                                               (pos['direction']==-1 and z[i]>=STOP_Z)):
                     reason = 'Z STOP'
-                elif np.isfinite(z[i]) and ((pos['direction']==1 and z[i]>=-TAKE_PROFIT_Z) or
-                                              (pos['direction']==-1 and z[i]<=TAKE_PROFIT_Z)):
+                elif np.isfinite(fixed_z) and ((pos['direction']==1 and fixed_z>=-TAKE_PROFIT_Z) or
+                                                (pos['direction']==-1 and fixed_z<=TAKE_PROFIT_Z)):
                     reason = 'MEAN REVERSION'
-                elif not valid[i]: reason = 'RELATIONSHIP / DATA INVALID'
+                #elif (ts - pos['entry_time']).total_seconds() / 86400 >= MAX_HOLD_DAYS:
+                    #reason = 'TIME STOP'
+                elif not eligible[i]: reason = 'RELATIONSHIP / DATA INVALID'
                 if reason:
                     pending=('exit',reason,i,None)
         elif pending is None and i+1 < len(s) and valid[i] and i>0 and valid[i-1]:
