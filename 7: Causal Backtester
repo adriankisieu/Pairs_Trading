@@ -94,8 +94,6 @@ def backtest_pair(s, name, half_spread_bps=HALF_SPREAD_BPS, slippage_bps=SLIPPAG
                 elif np.isfinite(fixed_z) and ((pos['direction']==1 and fixed_z>=-TAKE_PROFIT_Z) or
                                                 (pos['direction']==-1 and fixed_z<=TAKE_PROFIT_Z)):
                     reason = 'MEAN REVERSION'
-                #elif (ts - pos['entry_time']).total_seconds() / 86400 >= MAX_HOLD_DAYS:
-                    #reason = 'TIME STOP'
                 elif not eligible[i]: reason = 'RELATIONSHIP / DATA INVALID'
                 if reason:
                     pending=('exit',reason,i,None)
